@@ -19,13 +19,24 @@ int main() {
 
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(PORT);
-
     inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr);
 
     if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         printf("Koneksi gagal\n");
         return -1;
     }
+
+    // LOGIN SECTION
+    char name[32];
+    printf("Masukkan nama player: ");
+    fgets(name, sizeof(name), stdin);
+    name[strcspn(name, "\n")] = 0; // hapus newline
+
+    char login_cmd[64];
+    snprintf(login_cmd, sizeof(login_cmd), "LOGIN:%s", name);
+    send(sock, login_cmd, strlen(login_cmd), 0);
+    read(sock, buffer, sizeof(buffer));
+    printf("%s\n", buffer);
 
     while (1) {
         printf("\n------ MAIN MENU ------\n");
@@ -60,36 +71,29 @@ int main() {
         }
 
         send(sock, command, strlen(command), 0);
-
         memset(buffer, 0, sizeof(buffer));
         read(sock, buffer, sizeof(buffer));
     
         if (strcmp(command, "SHOP") == 0) {
             printf("%s", buffer);  
-            
             int weapon_choice;
             scanf("%d", &weapon_choice);
             getchar();
-
             char weapon_number[16];
             snprintf(weapon_number, sizeof(weapon_number), "%d", weapon_choice);
             send(sock, weapon_number, strlen(weapon_number), 0);
-            
             memset(buffer, 0, sizeof(buffer));
             read(sock, buffer, sizeof(buffer));
             printf("%s\n", buffer);
 
         } else if (strcmp(command, "VIEW_INVENTORY") == 0) {
             printf("%s", buffer);  
-            
             int weapon_choice;
             scanf("%d", &weapon_choice);
             getchar();
-
             char weapon_number[10];
             snprintf(weapon_number, sizeof(weapon_number), "%d", weapon_choice);
             send(sock, weapon_number, strlen(weapon_number), 0);
-            
             memset(buffer, 0, sizeof(buffer));
             read(sock, buffer, sizeof(buffer));
             printf("%s\n", buffer);
@@ -120,7 +124,7 @@ int main() {
             printf("%s\n", buffer);
         }
     }
-    
+
     close(sock);
     return 0;
 }
