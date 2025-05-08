@@ -2,280 +2,226 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <time.h>
-#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
-#include <signal.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <dirent.h>
-#include <errno.h>
+#include <signal.h>
+#include <arpa/inet.h>
 
+#define SERVER_PORT 8080
+#define DATA_BUFFER_SIZE 4096
+#define LOG_PATH "server/server.log"
 
-#define PORT 8080
-#define BUFFER_SIZE 1024
-#define DATABASE_DIR "server/database"
-#define LOG_FILE "server/server.log"
+void reverse_string(const char *input, char *result)
+{
+    int length = strlen(input);
+    for (int i = 0; i < length; i++)
+    {
+        result[i] = input[length - 1 - i];
+    }
+    result[length] = '\0';
+}
 
-void log_message(const char *source, const char *action, const char *info) {
-    time_t now;
-    time(&now);
-    struct tm *tm_info = localtime(&now);
-
-    char timestamp[20];
-    strftime(timestamp, 20, "%Y-%m-%d %H:%M:%S", tm_info);
-
-    FILE *log_file = fopen(LOG_FILE, "a");
-    if (log_file == NULL) {
-        perror("Failed to open log file");
+void store_jpeg_file(const char *content, const char *filepath)
+{
+    FILE *output_file = fopen(filepath, "wb");
+    if (output_file == NULL)
+    {
+        perror("Failed creating output file");
         return;
     }
 
-    fprintf(log_file, "[%s][%s]: [%s] [%s]\n", source, timestamp, action, info);
+    fwrite(content, 1, strlen(content), output_file);
+    fclose(output_file);
+}
+
+void send_error_response(int socket_fd, const char *message)
+{
+    send(socket_fd, message, strlen(message), 0);
+}
+
+void record_event(const char *origin, const char *operation, const char *details)
+{
+    time_t current;
+    time(&current);
+    struct tm *time_data = localtime(&current);
+
+    char time_str[20];
+    strftime(time_str, 20, "%Y-%m-%d %H:%M:%S", time_data);
+
+    FILE *log_file = fopen(LOG_PATH, "a");
+    if (log_file == NULL)
+    {
+        perror("Unable to access log file");
+        return;
+    }
+
+    fprintf(log_file, "[%s][%s]: [%s] [%s]\n", origin, time_str, operation, details);
     fclose(log_file);
 }
 
-void handle_sigint(int sig) {
-    log_message("Server", "SHUTDOWN", "Server terminated by signal");
-    exit(0);
-}
+void process_client_request(int connection_fd)
+{
+    char data_buffer[DATA_BUFFER_SIZE] = {0};
+    char ip_address[INET_ADDRSTRLEN];
+    struct sockaddr_in client_info;
+    socklen_t info_size = sizeof(client_info);
 
-void hex_to_bytes(const char *hex, unsigned char *bytes, size_t hex_len) {
-    for (size_t i = 0; i < hex_len; i += 2) {
-        sscanf(hex + i, "%2hhx", &bytes[i/2]);
-    }
-}
+    getpeername(connection_fd, (struct sockaddr *)&client_info, &info_size);
+    inet_ntop(AF_INET, &client_info.sin_addr, ip_address, INET_ADDRSTRLEN);
 
-void reverse_string(char *str) {
-    int length = strlen(str);
-    for (int i = 0; i < length / 2; i++) {
-        char temp = str[i];
-        str[i] = str[length - i - 1];
-        str[length - i - 1] = temp;
-    }
-}
-
-int decrypt_text(const char *input_text, unsigned char **output_data, size_t *output_len) {   
-// Make a copy of input to reverse
-    char *reversed = strdup(input_text);
-    if (!reversed) return -1;
-
-    // Reverse the text
-    reverse_string(reversed);
-
-    // Remove newlines if any
-    char *ptr = reversed;
-    while (*ptr) {
-        if (*ptr == '\n' || *ptr == '\r') *ptr = '\0';
-        ptr++;
+    int bytes_read = read(connection_fd, data_buffer, DATA_BUFFER_SIZE);
+    if (bytes_read <= 0)
+    {
+        perror("Reading data failed");
+        close(connection_fd);
+        return;
     }
 
-    // Check if hex string is valid
-    size_t hex_len = strlen(reversed);
-    if (hex_len % 2 != 0) {
-        free(reversed);
-        return -1;
-    }
-
-    // Allocate memory for binary data
-    *output_len = hex_len / 2;
-    *output_data = malloc(*output_len);
-    if (!*output_data) {
-        free(reversed);
-        return -1;
-    }
-
-    // Convert hex to bytes
-    hex_to_bytes(reversed, *output_data, hex_len);
-
-    free(reversed);
-    return 0;
-}
-
-int save_to_database(const unsigned char *data, size_t data_len, char *filename) {
-    // Create database directory if it doesn't exist
-    mkdir(DATABASE_DIR, 0777);
-
-    // Generate timestamp filename
-    time_t now;
-    time(&now);
-    snprintf(filename, 64, "%ld.jpeg", now);
-
-    char filepath[256];
-    snprintf(filepath, sizeof(filepath), "%s/%s", DATABASE_DIR, filename);
-
-    // Save the data to file
-    FILE *file = fopen(filepath, "wb");
-    if (!file) {
-        return -1;
-    }
-
-    fwrite(data, 1, data_len, file);
-    fclose(file);
-
-    return 0;
-}
-
-int send_file(int client_socket, const char *filename) {
-    char filepath[256];
-    snprintf(filepath, sizeof(filepath), "%s/%s", DATABASE_DIR, filename);
-
-    FILE *file = fopen(filepath, "rb");
-    if (!file) {
-        return -1;
-    }
-
-    // Get file size
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    // Send file size first
-    if (send(client_socket, &file_size, sizeof(file_size), 0) < 0) {
-        fclose(file);
-        return -1;
-    }
-
-    // Send file data
-    unsigned char buffer[BUFFER_SIZE];
-    size_t bytes_read;
-    while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, file)) > 0) {
-        if (send(client_socket, buffer, bytes_read, 0) < 0) {
-            fclose(file);
-            return -1;
+    if (strncmp(data_buffer, "DECRYPT", 7) == 0)
+    {
+        char *input_file = data_buffer + 8;
+        FILE *input_fp = fopen(input_file, "r");
+        if (input_fp == NULL)
+        {
+            send_error_response(connection_fd, "Error: File not found");
+            record_event("Server", "ERROR", "File not found");
+            close(connection_fd);
+            return;
         }
+
+        fseek(input_fp, 0, SEEK_END);
+        long file_size = ftell(input_fp);
+        fseek(input_fp, 0, SEEK_SET);
+
+        char *text_content = malloc(file_size + 1);
+        fread(text_content, 1, file_size, input_fp);
+        fclose(input_fp);
+
+        char reversed_text[file_size * 2];
+        reverse_string(text_content, reversed_text);
+        free(text_content);
+
+        time_t current_time = time(NULL);
+        char output_filename[50];
+        snprintf(output_filename, sizeof(output_filename), "server/database/%ld.jpeg", current_time);
+
+        store_jpeg_file(reversed_text, output_filename);
+
+        char reply[100];
+        snprintf(reply, sizeof(reply), "Server: Text decrypted and saved as %ld.jpeg", current_time);
+        send(connection_fd, reply, strlen(reply), 0);
+
+        record_event("Client", "DECRYPT", "Text data");
+        record_event("Server", "SAVE", output_filename);
     }
-    fclose(file);
-    return 0;
-}
+    else if (strncmp(data_buffer, "DOWNLOAD", 8) == 0)
+    {
+        char *requested_file = data_buffer + 9;
+        char complete_path[100];
+        snprintf(complete_path, sizeof(complete_path), "server/database/%s", requested_file);
 
-void handle_client(int client_socket) {
-    char buffer[BUFFER_SIZE];
-    int bytes_received;
-
-    while ((bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0)) > 0) {
-        buffer[bytes_received] = '\0';
-
-        if (strncmp(buffer, "DECRYPT:", 8) == 0) {
-            // Handle decrypt request
-            char *text_data = buffer + 8;
-
-            unsigned char *decrypted_data;
-            size_t decrypted_len;
-            char filename[64];
-
-            if (decrypt_text(text_data, &decrypted_data, &decrypted_len) == 0 &&
-                save_to_database(decrypted_data, decrypted_len, filename) == 0) {
-
-                log_message("Client", "DECRYPT", "Text data");
-                log_message("Server", "SAVE", filename);
-
-                send(client_socket, filename, strlen(filename), 0);
-            } else {
-                send(client_socket, "ERROR: Failed to decrypt or save file", 36, 0);
-                log_message("Server", "ERROR", "Failed to decrypt or save file");
-            }
-
-            free(decrypted_data);
+        FILE *download_fp = fopen(complete_path, "rb");
+        if (download_fp == NULL)
+        {
+            send_error_response(connection_fd, "Error: File not found for download");
+            record_event("Server", "ERROR", "File not found for download");
+            close(connection_fd);
+            return;
         }
-        else if (strncmp(buffer, "DOWNLOAD:", 9) == 0) {
-            // Handle download request
-            char *filename = buffer + 9;
 
-            log_message("Client", "DOWNLOAD", filename);
+        fseek(download_fp, 0, SEEK_END);
+        long download_size = ftell(download_fp);
+        fseek(download_fp, 0, SEEK_SET);
 
-            if (send_file(client_socket, filename) == 0) {
-                log_message("Server", "UPLOAD", filename);
-            } else {
-                send(client_socket, "ERROR: File not found", 20, 0);
-                log_message("Server", "ERROR", "File not found for download");            
-}
-        }
-        else if (strncmp(buffer, "EXIT", 4) == 0) {
-            log_message("Client", "EXIT", "Client requested to exit");
-            break;
-        }
+        char *file_contents = malloc(download_size);
+        fread(file_contents, 1, download_size, download_fp);
+        fclose(download_fp);
+
+        send(connection_fd, &download_size, sizeof(download_size), 0);
+        send(connection_fd, file_contents, download_size, 0);
+        free(file_contents);
+
+        record_event("Client", "DOWNLOAD", requested_file);
+        record_event("Server", "UPLOAD", requested_file);
+    }
+    else if (strncmp(data_buffer, "EXIT", 4) == 0)
+    {
+        record_event("Client", "EXIT", "Client requested to exit");
     }
 
-    close(client_socket);
+    close(connection_fd);
 }
 
-int main() {
-    // Set up signal handler
-    signal(SIGINT, handle_sigint);
+int initialize_server()
+{
+    mkdir("server", 0755);
+    mkdir("server/database", 0755);
 
-    // Create server and database directories
-    mkdir("server", 0777);
-    mkdir(DATABASE_DIR, 0777);
+    pid_t process_id = fork();
+    if (process_id < 0)
+    {
+        exit(EXIT_FAILURE);
+    }
+    if (process_id > 0)
+    {
+        exit(EXIT_SUCCESS);
+    }
 
-    // Initialize log file
-    log_message("Server", "STARTUP", "Server started");
+    umask(0);
 
-    int server_socket, client_socket;
-    struct sockaddr_in server_addr, client_addr;
-    socklen_t client_len = sizeof(client_addr);
+    int server_socket, client_connection;
+    struct sockaddr_in server_address;
+    int option = 1;
+    int address_length = sizeof(server_address);
 
-    // Create socket
-    server_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_socket < 0) {
+    if ((server_socket = socket(AF_INET, SOCK_STREAM, 0)) == 0)
+    {
         perror("Socket creation failed");
         exit(EXIT_FAILURE);
     }
 
-    // Configure server address
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(PORT);
+    if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &option, sizeof(option)))
+    {
+        perror("Socket options failed");
+        exit(EXIT_FAILURE);
+    }
 
-    // Bind socket
-    if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-    perror("Bind failed");
-    exit(EXIT_FAILURE);
-}
- 
-   // Listen for connections
-    if (listen(server_socket, 5) < 0) {
+    server_address.sin_family = AF_INET;
+    server_address.sin_addr.s_addr = INADDR_ANY;
+    server_address.sin_port = htons(SERVER_PORT);
+
+    if (bind(server_socket, (struct sockaddr *)&server_address, sizeof(server_address)) < 0)
+    {
+        perror("Binding failed");
+        exit(EXIT_FAILURE);
+    }
+
+    if (listen(server_socket, 3) < 0)
+    {
         perror("Listen failed");
         exit(EXIT_FAILURE);
     }
 
-    // Daemonize the server
-    if (fork() != 0) {
-        exit(0);
-    }
+    record_event("Server", "START", "Server initialized");
 
-    setsid();
-    close(STDIN_FILENO);
-    close(STDOUT_FILENO);
-    close(STDERR_FILENO);
-
-    // Main server loop
-    while (1) {
-        client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_len);
-        if (client_socket < 0) {
-            log_message("Server", "ERROR", "Client connection failed");
+    while (1)
+    {
+        if ((client_connection = accept(server_socket, (struct sockaddr *)&server_address, (socklen_t *)&address_length)) < 0)
+        {
+            perror("Connection acceptance failed");
             continue;
         }
 
-        // Log client connection
-        char client_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &(client_addr.sin_addr), client_ip, INET_ADDRSTRLEN);
-        char conn_info[64];
-        snprintf(conn_info, sizeof(conn_info), "Client connected from %s", client_ip);
-        log_message("Server", "CONNECT", conn_info);
-
-        // Handle client in a child process
-        if (fork() == 0) {
-            close(server_socket);
-            handle_client(client_socket);
-            exit(0);
-        }
-
-        close(client_socket);
+        process_client_request(client_connection);
     }
 
-    close(server_socket);
     return 0;
+}
+
+int main()
+{
+    return initialize_server();
 }
