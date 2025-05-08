@@ -1,251 +1,170 @@
-#include <sys/stat.h>  // For mkdir()
 #include <stdio.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <time.h>
-#include <dirent.h>
-#include <errno.h>
 
-#define PORT 8080
-#define BUFFER_SIZE 1024
-#define SECRETS_DIR "client/secrets"
-#define OUTPUT_DIR "client"
 
-void display_menu() {
-    printf("\n=== The Legend of Rootkids ===\n");
-    printf("1. List available text files\n");
-    printf("2. Decrypt and save a text file\n");
-    printf("3. Download a JPEG from server\n");
-    printf("4. Exit\n");
-    printf("Choose an option: ");
+#define SERVER_PORT 8080
+#define MAX_BUFFER 4096
+
+int establish_server_connection()
+{
+    int connection_fd;
+    struct sockaddr_in server_details;
+
+    if ((connection_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+    {
+        printf("\nFailed to create socket\n");
+        return -1;
+    }
+
+    server_details.sin_family = AF_INET;
+    server_details.sin_port = htons(SERVER_PORT);
+
+    if (inet_pton(AF_INET, "127.0.0.1", &server_details.sin_addr) <= 0)
+    {
+        printf("\nInvalid server address\n");
+        return -1;
+    }
+
+    if (connect(connection_fd, (struct sockaddr *)&server_details, sizeof(server_details)) < 0)
+    {
+        printf("\nServer connection failed\n");
+        return -1;
+    }
+
+    return connection_fd;
 }
 
-void list_text_files() {
-    DIR *dir;
-    struct dirent *ent;
+void fetch_server_file(int connection_fd, const char *file_name)
+{
+    char download_request[MAX_BUFFER];
+    snprintf(download_request, sizeof(download_request), "DOWNLOAD %s", file_name);
+    send(connection_fd, download_request, strlen(download_request), 0);
 
-    printf("\nAvailable text files in %s:\n", SECRETS_DIR);
+    long file_size;
+    read(connection_fd, &file_size, sizeof(file_size));
 
-    if ((dir = opendir(SECRETS_DIR)) != NULL) {
-        while ((ent = readdir(dir)) != NULL) {
-            if (strstr(ent->d_name, ".txt")) {
-                printf("- %s\n", ent->d_name);
-            }
-        }
-        closedir(dir);
-    } else {
-        perror("Could not open secrets directory");
-    }
-}
+    char *file_data = malloc(file_size);
+    read(connection_fd, file_data, file_size);
 
-int connect_to_server() {
- int sock = 0;
-    struct sockaddr_in serv_addr;
+    char destination_path[100];
+    snprintf(destination_path, sizeof(destination_path), "client/%s", file_name);
 
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        printf("\nSocket creation error\n");
-        return -1;
+    FILE *output_file = fopen(destination_path, "wb");
+    if (output_file == NULL)
+    {
+        printf("Error: Could not create output file\n");
+        free(file_data);
+        return;
     }
 
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(PORT);
-
-    // Convert IPv4 address from text to binary form
-    if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
-        printf("\nInvalid address/ Address not supported\n");
-        return -1;
-    }
-
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        printf("\nConnection Failed\n");
-        return -1;
-    }
-
-    return sock;
-}
-
-int send_decrypt_request(int sock, const char *filename) {
-    char filepath[256];
-    snprintf(filepath, sizeof(filepath), "%s/%s", SECRETS_DIR, filename);
-
-    FILE *file = fopen(filepath, "r");
-    if (!file) {
-        printf("Error: Could not open file %s\n", filename);
-        return -1;
-    }
-
-    // Read file content
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    char *file_content = malloc(file_size + 1);
-    if (!file_content) {
-        fclose(file);
-        return -1;
-    }
-
-    fread(file_content, 1, file_size, file);
-    file_content[file_size] = '\0';
-    fclose(file);
-
-    // Prepare and send request
-    char request[BUFFER_SIZE];
-    snprintf(request, sizeof(request), "DECRYPT:%s", file_content);
-    free(file_content);
-
-    if (send(sock, request, strlen(request), 0) < 0) {
-        printf("Error sending decrypt request\n");
-        return -1;
-    }
-
-    // Receive response
-    char response[BUFFER_SIZE];
-    int bytes_received = recv(sock, response, BUFFER_SIZE, 0);
-    if (bytes_received <= 0) {
-        printf("Error receiving response from server\n");
-        return -1;
-    }
-
-    response[bytes_received] = '\0';
-
-    if (strncmp(response, "ERROR:", 6) == 0) {
-        printf("Server error: %s\n", response + 6);
-        return -1;
-    }
-
-    printf("File successfully decrypted and saved as: %s\n", response);
-    return 0;
-}
-
-int send_download_request(int sock, const char *filename) {
-    char request[BUFFER_SIZE];
-    snprintf(request, sizeof(request), "DOWNLOAD:%s", filename);
-
-    if (send(sock, request, strlen(request), 0) < 0) {
-        printf("Error sending download request\n");
-        return -1;
-    }
-
-    // First receive file size
- long file_size;
-    if (recv(sock, &file_size, sizeof(file_size), 0) <= 0) {
-        printf("Error receiving file size\n");
-        return -1;
-    }
-
-    if (file_size <= 0) {
-        printf("Error: Invalid file size received\n");
-        return -1;
-    }
-
-    // Create output directory if it doesn't exist
-   // Create output directory if it doesn't exist
-if (mkdir(OUTPUT_DIR, 0777) == -1 && errno != EEXIST) {
-    printf("Error creating output directory\n");
-    return -1;
-}
-
-    // Prepare output file path
-    char output_path[256];
-    snprintf(output_path, sizeof(output_path), "%s/%s", OUTPUT_DIR, filename);
-
-    FILE *output_file = fopen(output_path, "wb");
-    if (!output_file) {
-        printf("Error creating output file\n");
-        return -1;
-    }
-
-    // Receive file data
-    unsigned char buffer[BUFFER_SIZE];
-    long total_received = 0;
-
-    while (total_received < file_size) {
-        int bytes_received = recv(sock, buffer, BUFFER_SIZE, 0);
-        if (bytes_received <= 0) {
-            printf("Error receiving file data\n");
-            fclose(output_file);
-            return -1;
-        }
-
-        fwrite(buffer, 1, bytes_received, output_file);
-        total_received += bytes_received;
-    }
-
+    fwrite(file_data, 1, file_size, output_file);
     fclose(output_file);
- printf("File successfully downloaded to: %s\n", output_path);
-    return 0;
+    free(file_data);
+
+    printf("Success! File saved as %s\n", file_name);
 }
 
-int main() {
-    int option;
-    int sock;
-    char filename[256];
+void upload_for_processing(int connection_fd, const char *file_name)
+{
+    char complete_path[100];
+    snprintf(complete_path, sizeof(complete_path), "client/secrets/%s", file_name);
 
-    while (1) {
-        display_menu();
-        scanf("%d", &option);
-        getchar(); // Consume newline
+    FILE *input_file = fopen(complete_path, "r");
+    if (input_file == NULL)
+    {
+        printf("Error: Could not locate file\n");
+        return;
+    }
 
-        switch (option) {
-            case 1:
-                list_text_files();
+    char request[MAX_BUFFER];
+    snprintf(request, sizeof(request), "DECRYPT %s", complete_path);
+    send(connection_fd, request, strlen(request), 0);
+
+    char response[MAX_BUFFER] = {0};
+    read(connection_fd, response, MAX_BUFFER);
+    printf("%s\n", response);
+}
+
+void show_client_options()
+{
+    printf("\nThe Legend Of Rootkid\n");
+    printf("----------------------------\n");
+    printf("1. Upload file for decryption\n");
+    printf("2. Retrieve file from server\n");
+    printf("3. Quit application\n");
+    printf(">> ");
+}
+
+int run_client_program()
+{
+    int user_choice;
+    int server_connection;
+    char input_filename[100];
+
+    while (1)
+    {
+        show_client_options();
+        scanf("%d", &user_choice);
+        getchar(); // Clear input buffer
+
+        switch (user_choice)
+        {
+        case 1:
+            printf("Enter filename to process: ");
+            fgets(input_filename, sizeof(input_filename), stdin);
+            input_filename[strcspn(input_filename, "\n")] = 0;
+
+            server_connection = establish_server_connection();
+            if (server_connection < 0)
+            {
+                printf("Could not connect to server\n");
                 break;
+            }
 
-            case 2:
-                printf("Enter filename to decrypt (from secrets folder): ");
-                fgets(filename, sizeof(filename), stdin);
-                filename[strcspn(filename, "\n")] = '\0'; // Remove newline
+            upload_for_processing(server_connection, input_filename);
+            close(server_connection);
+            break;
 
-                sock = connect_to_server();
-                if (sock < 0) {
-                    printf("Failed to connect to server\n");
-                    break;
-                }
+        case 2:
+            printf("Enter filename to download: ");
+            fgets(input_filename, sizeof(input_filename), stdin);
+            input_filename[strcspn(input_filename, "\n")] = 0;
 
-                if (send_decrypt_request(sock, filename) == 0) {
-                    printf("Decryption successful!\n");
-                }
-
-                close(sock);
+            server_connection = establish_server_connection();
+            if (server_connection < 0)
+            {
+                printf("Could not connect to server\n");
                 break;
+            }
 
-            case 3:
-                printf("Enter filename to download (e.g., 1234567890.jpeg): ");
-                fgets(filename, sizeof(filename), stdin);
-                filename[strcspn(filename, "\n")] = '\0'; // Remove newline
+            fetch_server_file(server_connection, input_filename);
+            close(server_connection);
+            break;
 
-                sock = connect_to_server();
-                if (sock < 0) {
-                    printf("Failed to connect to server\n");
-                   break;
-                }
+        case 3:
+            server_connection = establish_server_connection();
+            if (server_connection >= 0)
+            {
+                send(server_connection, "EXIT", 4, 0);
+                close(server_connection);
+            }
+            printf("Closing client...\n");
+            exit(0);
 
-                if (send_download_request(sock, filename) == 0) {
-                    printf("Download successful!\n");
-                }
-
-                close(sock);
-                break;
-
-            case 4:
-                // Send exit request if connected
-                sock = connect_to_server();
-                if (sock >= 0) {
-                    send(sock, "EXIT", 4, 0);
-                    close(sock);
-                }
-                printf("Exiting...\n");
-                return 0;
-
-            default:
-                printf("Invalid option. Please try again.\n");
+        default:
+            printf("Invalid selection\n");
         }
     }
 
     return 0;
+}
+
+int main()
+{
+    return run_client_program();
 }
